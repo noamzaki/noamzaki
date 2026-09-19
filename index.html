@@ -983,22 +983,24 @@ function waUrl(phone, text) {
  */
 function waOpen(phone, text) {
   const url = waUrl(phone, text);
-  let win = null;
-  try { win = window.open(url, '_blank', 'noopener'); } catch (e) { win = null; }
-  // Popup blocked (win is null, or undefined in some in-app browsers): fall back to
-  // a real anchor click, which browsers allow far more readily than window.open,
-  // and only then to a same-tab navigation.
-  if (!win) {
-    try {
-      const a = document.createElement('a');
-      a.href = url; a.target = '_blank'; a.rel = 'noopener';
-      document.body.appendChild(a);
-      a.click();
-      a.remove();
-      win = true;
-    } catch (e) { win = null; }
+  // NOTE: do NOT pass 'noopener' to window.open — per spec it makes the call
+  // return null even when the tab opened fine, which would make the fallback
+  // below fire too and open WhatsApp twice. We use an anchor with rel=noopener
+  // instead, which is both safe and detectable.
+  let opened = false;
+  try {
+    const a = document.createElement('a');
+    a.href = url; a.target = '_blank'; a.rel = 'noopener';
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
+    opened = true;
+  } catch (e) { opened = false; }
+  if (!opened) {
+    let win = null;
+    try { win = window.open(url, '_blank'); } catch (e) { win = null; }
+    if (!win) { try { location.href = url; } catch (e) { } }   // last resort → same tab
   }
-  if (!win) { try { location.href = url; } catch (e) { } }   // last resort → same tab
   if (S.settings.waAutoCopy) copyText(text);
   return url;
 }
@@ -2322,7 +2324,9 @@ function showSavedPanel(inv) {
       <div class="muted">${esc(inv.no)} · ${esc(inv.customerName)} · ${fmtDate(inv.date)}</div>
       ${pending > 0 ? `<div class="pill warn" style="margin-top:8px">${money(pending)} added to khata</div>` : `<div class="pill ok" style="margin-top:8px">Fully paid</div>`}
       <div class="saved-actions">
-        <button class="btn wa" data-act="wa-invoice" data-id="${inv.id}">${icon('wa')} Send bill on WhatsApp</button>
+        <button class="btn wa" data-act="wa-invoice-pdf" data-id="${inv.id}">${icon('wa')} Send PDF on WhatsApp</button>
+        <button class="btn ghost" data-act="wa-invoice" data-id="${inv.id}">${icon('wa')} Send as text</button>
+        <button class="btn ghost" data-act="pdf-invoice" data-id="${inv.id}">${icon('download')} Save PDF</button>
         <button class="btn ghost" data-act="print-invoice" data-id="${inv.id}">${icon('print')} Print bill</button>
         ${cust ? `<button class="btn ghost" data-act="open-customer" data-id="${cust.id}">Open khata</button>` : ''}
         <button class="btn ghost" data-act="modal-close">Done</button>
@@ -2391,8 +2395,9 @@ VIEWS.invoices = function () {
           <small>${a.due > 0 ? `<span class="warn-t">${money(a.due)} pending</span>` : `<span class="ok-t">settled</span>`}</small>
         </div>
         <div class="row-actions">
+          <button class="icon-btn" data-act="pdf-invoice" data-id="${i.id}" title="Save PDF">${icon('download')}</button>
           <button class="icon-btn" data-act="print-invoice" data-id="${i.id}" title="Print">${icon('print')}</button>
-          <button class="icon-btn" data-act="wa-invoice" data-id="${i.id}" title="WhatsApp">${icon('wa')}</button>
+          <button class="icon-btn" data-act="wa-invoice-pdf" data-id="${i.id}" title="Send PDF on WhatsApp">${icon('wa')}</button>
           ${can('deleteBill') ? `<button class="icon-btn" data-act="edit-invoice" data-id="${i.id}" title="Edit">${icon('edit')}</button>` : ''}
         </div>
       </div>`;
@@ -2442,7 +2447,9 @@ ACTIONS['view-invoice'] = (el) => {
       ${inv.note ? `<p class="note-line">Note: ${esc(inv.note)}</p>` : ''}
       ${inv.createdByName ? `<p class="note-line">Billed by: <b>${esc(inv.createdByName)}</b>${inv.createdBy && inv.createdBy !== inv.createdByName ? ' (' + esc(inv.createdBy) + ')' : ''}</p>` : ''}
       <div class="modal-actions">
-        <button class="btn wa" data-act="wa-invoice" data-id="${inv.id}">${icon('wa')} Send bill on WhatsApp</button>
+        <button class="btn wa" data-act="wa-invoice-pdf" data-id="${inv.id}">${icon('wa')} Send PDF on WhatsApp</button>
+        <button class="btn ghost" data-act="wa-invoice" data-id="${inv.id}">${icon('wa')} Text only</button>
+        <button class="btn ghost" data-act="pdf-invoice" data-id="${inv.id}">${icon('download')} Save PDF</button>
         <button class="btn primary" data-act="print-invoice" data-id="${inv.id}">${icon('print')} Print</button>
         ${alloc.due > 0 && cust ? `<button class="btn ghost" data-act="pay-modal" data-cust="${cust.id}" data-inv="${inv.id}">Take payment</button>` : ''}
         ${cust ? `<button class="btn ghost" data-act="open-customer" data-id="${cust.id}">Khata</button>` : ''}
@@ -2573,6 +2580,307 @@ function printHTML(inner, title) {
     setTimeout(() => { host.innerHTML = ''; }, 800);
   }, 120);
 }
+
+/* ===== 55-pdf.js =====
+   Minimal PDF writer — no external library, works offline.
+   Produces a real one-page A4 PDF of a bill using the 14 standard
+   PDF base fonts (Helvetica), so nothing has to be embedded.
+
+   Only WinAnsi-encodable text is safe, so the rupee sign (U+20B9) is
+   written as "Rs." in PDFs. Everything else on screen stays as is.
+   ------------------------------------------------------------------ */
+
+/** Escape a string for a PDF literal string object. */
+function pdfEsc(s) {
+  return String(s == null ? '' : s)
+    .replace(/\\/g, '\\\\')
+    .replace(/\(/g, '\\(')
+    .replace(/\)/g, '\\)');
+}
+
+/** Map characters PDF base fonts cannot show onto safe ASCII. */
+function pdfText(s) {
+  return String(s == null ? '' : s)
+    .replace(/\u20b9/g, 'Rs.')      // ₹
+    .replace(/[\u2018\u2019]/g, "'")
+    .replace(/[\u201c\u201d]/g, '"')
+    .replace(/[\u2013\u2014]/g, '-')
+    .replace(/\u00d7/g, 'x')        // ×
+    // Fold accented Latin letters to their base letter instead of deleting them,
+    // so "Shri Balaji" survives rather than becoming "Shr Blj".
+    .normalize('NFD').replace(/[\u0300-\u036f]/g, '')
+    .replace(/[^\x20-\x7e\n]/g, ''); // drop anything still non-ASCII
+}
+
+/** Width of a string in Helvetica at `size`, in PDF points (approximate). */
+function pdfWidth(s, size, bold) {
+  // Average Helvetica advance widths (per 1000 units) for the ASCII range.
+  const t = pdfText(s);
+  let w = 0;
+  for (const ch of t) {
+    if (ch === ' ') w += 278;
+    else if (/[ilj.,:;'!|]/.test(ch)) w += 250;
+    else if (/[ftr()\[\]\-]/.test(ch)) w += 333;
+    else if (/[A-Z]/.test(ch)) w += 700;
+    else if (/[0-9]/.test(ch)) w += 556;
+    else if (/[mw]/.test(ch)) w += 833;
+    else w += 545;
+  }
+  return (w / 1000) * size * (bold ? 1.04 : 1);
+}
+
+/** Trim a string so it fits `maxW` points, adding an ellipsis when cut. */
+function pdfFit(s, maxW, size, bold) {
+  let t = pdfText(s);
+  if (pdfWidth(t, size, bold) <= maxW) return t;
+  while (t.length > 1 && pdfWidth(t + '...', size, bold) > maxW) t = t.slice(0, -1);
+  return t + '...';
+}
+
+/**
+ * Build a PDF from a list of drawing ops and return it as a Blob.
+ * ops: { text, x, y, size, bold, align, gray } | { line: [x1,y1,x2,y2], w, gray }
+ *      | { rect: [x,y,w,h], fill }
+ * Coordinates are in points from the TOP-LEFT (this helper flips them).
+ */
+function pdfBuild(ops, opts) {
+  const o = opts || {};
+  const W = o.width || 595.28;    // A4 portrait
+  const H = o.height || 841.89;
+  const parts = [];
+
+  for (const op of ops) {
+    if (op.line) {
+      const [x1, y1, x2, y2] = op.line;
+      const g = op.gray == null ? 0.75 : op.gray;
+      parts.push(`${g} G ${op.w || 0.6} w ${x1.toFixed(2)} ${(H - y1).toFixed(2)} m ${x2.toFixed(2)} ${(H - y2).toFixed(2)} l S`);
+    } else if (op.rect) {
+      const [x, y, w, h] = op.rect;
+      const g = op.fill == null ? 0.93 : op.fill;
+      parts.push(`${g} g ${x.toFixed(2)} ${(H - y - h).toFixed(2)} ${w.toFixed(2)} ${h.toFixed(2)} re f`);
+    } else if (op.text != null) {
+      const size = op.size || 9;
+      const font = op.bold ? '/F2' : '/F1';
+      let x = op.x || 0;
+      const tw = pdfWidth(op.text, size, op.bold);
+      if (op.align === 'right') x = x - tw;
+      else if (op.align === 'center') x = x - tw / 2;
+      const g = op.gray == null ? 0 : op.gray;
+      parts.push(`BT ${g} g ${font} ${size} Tf ${x.toFixed(2)} ${(H - (op.y || 0)).toFixed(2)} Td (${pdfEsc(pdfText(op.text))}) Tj ET`);
+    }
+  }
+
+  const stream = parts.join('\n');
+  const objs = [
+    '<< /Type /Catalog /Pages 2 0 R >>',
+    '<< /Type /Pages /Kids [3 0 R] /Count 1 >>',
+    `<< /Type /Page /Parent 2 0 R /MediaBox [0 0 ${W.toFixed(2)} ${H.toFixed(2)}] ` +
+      '/Resources << /Font << /F1 5 0 R /F2 6 0 R >> >> /Contents 4 0 R >>',
+    `<< /Length ${stream.length} >>\nstream\n${stream}\nendstream`,
+    '<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica /Encoding /WinAnsiEncoding >>',
+    '<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica-Bold /Encoding /WinAnsiEncoding >>'
+  ];
+
+  let pdf = '%PDF-1.4\n';
+  const offsets = [];
+  objs.forEach((body, i) => {
+    offsets.push(pdf.length);
+    pdf += `${i + 1} 0 obj\n${body}\nendobj\n`;
+  });
+  const xref = pdf.length;
+  pdf += `xref\n0 ${objs.length + 1}\n0000000000 65535 f \n`;
+  offsets.forEach((off) => { pdf += String(off).padStart(10, '0') + ' 00000 n \n'; });
+  pdf += `trailer\n<< /Size ${objs.length + 1} /Root 1 0 R >>\nstartxref\n${xref}\n%%EOF`;
+
+  const bytes = new Uint8Array(pdf.length);
+  for (let i = 0; i < pdf.length; i++) bytes[i] = pdf.charCodeAt(i) & 0xff;
+  return bytes;
+}
+
+/** Lay a bill out as PDF drawing ops. */
+function invoicePdfOps(inv, S, helpers) {
+  const { money, fmtDate, qtyFmt, num, amountInWords, customerBalance, findCustomer } = helpers;
+  const s = S.settings || {};
+  const cust = findCustomer ? findCustomer(inv.customerId) : null;
+  const ops = [];
+  const L = 40, R = 555;
+  let y = 55;
+
+  ops.push({ text: s.shopName || 'My Wholesale Store', x: L, y, size: 17, bold: true });
+  ops.push({ text: (s.taxEnabled && s.gstin) ? 'TAX INVOICE' : 'INVOICE', x: R, y, size: 13, bold: true, align: 'right' });
+  y += 15;
+  if (s.address) { ops.push({ text: s.address, x: L, y, size: 8.5, gray: 0.35 }); }
+  ops.push({ text: 'Bill No: ' + (inv.no || ''), x: R, y, size: 9, align: 'right' });
+  y += 12;
+  const shopLine = [s.phone ? 'Ph: ' + s.phone : '', s.gstin ? 'GSTIN: ' + s.gstin : ''].filter(Boolean).join('   ');
+  if (shopLine) ops.push({ text: shopLine, x: L, y, size: 8.5, gray: 0.35 });
+  ops.push({ text: 'Date: ' + fmtDate(inv.date), x: R, y, size: 9, align: 'right' });
+  y += 14;
+  ops.push({ line: [L, y, R, y], w: 1, gray: 0.5 });
+  y += 18;
+
+  ops.push({ text: 'BILL TO', x: L, y, size: 7.5, bold: true, gray: 0.45 });
+  y += 12;
+  ops.push({ text: inv.customerName || 'Cash / Walk-in', x: L, y, size: 11, bold: true });
+  y += 12;
+  if (cust && cust.phone) { ops.push({ text: 'Ph: ' + cust.phone, x: L, y, size: 8.5, gray: 0.35 }); y += 11; }
+  if (cust && cust.address) { ops.push({ text: pdfFit(cust.address, 300, 8.5), x: L, y, size: 8.5, gray: 0.35 }); y += 11; }
+  if (cust && cust.gstin) { ops.push({ text: 'GSTIN: ' + cust.gstin, x: L, y, size: 8.5, gray: 0.35 }); y += 11; }
+  y += 8;
+
+  // table header
+  const cX = { n: L + 4, item: L + 26, qty: 330, rate: 400, amt: R - 4 };
+  ops.push({ rect: [L, y - 10, R - L, 20], fill: 0.92 });
+  ops.push({ text: '#', x: cX.n, y, size: 8.5, bold: true });
+  ops.push({ text: 'Item', x: cX.item, y, size: 8.5, bold: true });
+  ops.push({ text: 'Qty', x: cX.qty, y, size: 8.5, bold: true, align: 'right' });
+  ops.push({ text: 'Rate', x: cX.rate, y, size: 8.5, bold: true, align: 'right' });
+  ops.push({ text: 'Amount', x: cX.amt, y, size: 8.5, bold: true, align: 'right' });
+  y += 18;
+
+  const lines = inv.lines || [];
+  const maxRows = 24;
+  lines.slice(0, maxRows).forEach((l, i) => {
+    ops.push({ text: String(i + 1), x: cX.n, y, size: 8.5 });
+    ops.push({ text: pdfFit(l.name, cX.qty - cX.item - 46, 8.5), x: cX.item, y, size: 8.5 });
+    ops.push({ text: qtyFmt(l.qty) + ' ' + (l.sellUnit === 'box' ? 'box' : (l.unit || '')), x: cX.qty, y, size: 8.5, align: 'right' });
+    ops.push({ text: money(l.rate, false), x: cX.rate, y, size: 8.5, align: 'right' });
+    ops.push({ text: money(l.total, false), x: cX.amt, y, size: 8.5, align: 'right', bold: true });
+    y += 14;
+    ops.push({ line: [L, y - 4, R, y - 4], gray: 0.88 });
+  });
+  if (lines.length > maxRows) {
+    ops.push({ text: `... and ${lines.length - maxRows} more item(s) — see the full bill in the app`, x: cX.item, y, size: 8, gray: 0.4 });
+    y += 14;
+  }
+
+  y += 8;
+  const t = inv.totals || {};
+  const tl = 360;
+  const row = (label, val, bold, size) => {
+    ops.push({ text: label, x: tl, y, size: size || 9, bold: !!bold });
+    ops.push({ text: val, x: R - 4, y, size: size || 9, bold: !!bold, align: 'right' });
+    y += 13;
+  };
+  if (num(t.itemDiscount) || num(t.billDiscount)) {
+    row('Items total', money(num(t.gross) || num(inv.total), false));
+    if (num(t.itemDiscount)) row('Item discount', '-' + money(t.itemDiscount, false));
+    if (num(t.billDiscount)) row('Bill discount', '-' + money(t.billDiscount, false));
+  }
+  if (s.taxEnabled) {
+    row('Taxable', money(num(t.subtotal) || 0, false));
+    row('GST', money(num(t.tax) || num(inv.tax), false));
+  }
+  if (num(t.roundOff)) row('Round off', (num(t.roundOff) > 0 ? '+' : '-') + money(Math.abs(num(t.roundOff)), false));
+  ops.push({ line: [tl, y - 4, R, y - 4], w: 0.8, gray: 0.5 });
+  y += 4;
+  row('GRAND TOTAL', money(inv.total, false), true, 11);
+  if (num(inv.paidAtSale)) row('Paid (' + (inv.payMode || 'cash') + ')', money(inv.paidAtSale, false));
+  const due = Math.max(0, num(inv.total) - num(inv.paidAtSale));
+  if (due > 0.004) row('Balance on this bill', money(due, false), true);
+  if (cust && customerBalance) {
+    const bal = customerBalance(cust, S.invoices, S.payments);
+    if (Math.abs(bal) > 0.004) row('Total khata balance', money(bal, false), true);
+  }
+
+  let wy = y + 6;
+  if (amountInWords) {
+    ops.push({ text: 'Amount in words:', x: L, y: wy, size: 8, bold: true, gray: 0.35 });
+    wy += 11;
+    ops.push({ text: pdfFit(amountInWords(inv.total), 300, 8), x: L, y: wy, size: 8, gray: 0.35 });
+    wy += 14;
+  }
+  if (s.terms) {
+    ops.push({ text: pdfFit(s.terms, 300, 7.5), x: L, y: wy, size: 7.5, gray: 0.45 });
+  }
+
+  const fy = 800;
+  ops.push({ line: [L, fy - 12, R, fy - 12], gray: 0.85 });
+  ops.push({ text: 'Thank you for your business!', x: L, y: fy, size: 8, gray: 0.45 });
+  ops.push({ text: 'Authorised Signatory', x: R, y: fy, size: 8, gray: 0.45, align: 'right' });
+  return ops;
+}
+
+/* ---------- PDF: build, download, share ---------- */
+
+/** Helpers the layout function needs, bound to the live app state. */
+function pdfHelpers() {
+  return { money, fmtDate, qtyFmt, num, amountInWords, customerBalance, findCustomer };
+}
+
+/** Build a bill PDF and return { blob, filename }. */
+function invoicePdfBlob(inv) {
+  const ops = invoicePdfOps(inv, S, pdfHelpers());
+  const bytes = pdfBuild(ops);
+  const safeNo = String(inv.no || 'bill').replace(/[^\w.-]+/g, '-');
+  const safeCust = String(inv.customerName || 'cash').replace(/[^\w.-]+/g, '-').slice(0, 24);
+  return { blob: new Blob([bytes], { type: 'application/pdf' }), filename: `${safeNo}-${safeCust}.pdf` };
+}
+
+/** Save a Blob to the device. */
+function downloadBlob(blob, filename) {
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = url; a.download = filename;
+  document.body.appendChild(a);
+  a.click();
+  a.remove();
+  setTimeout(() => URL.revokeObjectURL(url), 4000);
+}
+
+/** Can this device attach a file to WhatsApp via the OS share sheet? */
+function canShareFiles() {
+  try {
+    return !!(navigator.canShare && navigator.share &&
+      navigator.canShare({ files: [new File(['x'], 'x.pdf', { type: 'application/pdf' })] }));
+  } catch (e) { return false; }
+}
+
+ACTIONS['pdf-invoice'] = (el) => {
+  const inv = findInvoice(el.dataset.id);
+  if (!inv) return;
+  try {
+    const { blob, filename } = invoicePdfBlob(inv);
+    downloadBlob(blob, filename);
+    UI.toast('PDF saved: ' + filename, 'ok', 5000);
+  } catch (e) {
+    console.error(e);
+    UI.toast('Could not make the PDF: ' + (e.message || e), 'warn', 7000);
+  }
+};
+
+/**
+ * Share the bill PDF as a real WhatsApp attachment.
+ * Phones with the Web Share API get the native sheet (pick WhatsApp → the PDF is
+ * attached, with the bill summary as the caption). Anywhere else we cannot attach
+ * a file to WhatsApp from a web page at all — WhatsApp has no such URL API — so we
+ * download the PDF and open the chat with the text, ready for the user to attach.
+ */
+ACTIONS['wa-invoice-pdf'] = async (el) => {
+  const inv = findInvoice(el.dataset.id);
+  if (!inv) return;
+  const cust = findCustomer(inv.customerId);
+  const text = invoiceWAText(inv);
+  let made;
+  try { made = invoicePdfBlob(inv); }
+  catch (e) { console.error(e); return UI.toast('Could not make the PDF: ' + (e.message || e), 'warn', 7000); }
+
+  if (canShareFiles()) {
+    try {
+      const file = new File([made.blob], made.filename, { type: 'application/pdf' });
+      await navigator.share({ files: [file], text, title: 'Bill ' + inv.no });
+      UI.toast('Shared ✓');
+      return;
+    } catch (e) {
+      if (e && e.name === 'AbortError') return;      // user cancelled the sheet
+      console.warn('share failed, falling back', e);
+    }
+  }
+  // Desktop / unsupported: save the file, then open the chat with the text.
+  downloadBlob(made.blob, made.filename);
+  waOpen(cust && cust.phone ? cust.phone : '', text);
+  UI.toast('PDF saved as ' + made.filename + ' — attach it in the WhatsApp chat (📎)', 'ok', 9000);
+};
 
 /* ------------------------------ WhatsApp share ------------------------------ */
 function invoiceWAText(inv) {

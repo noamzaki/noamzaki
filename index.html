@@ -1685,7 +1685,7 @@ const S = {
   session: null,          // { role, perms, name, email } — who is using the app
   tab: 'dash',
   ready: false,
-  filters: { inv: { q: '', from: '', to: '', cust: '', status: '' }, prod: { q: '', low: false }, khata: { q: '', onlyDue: false }, pay: { from: '', to: '' } },
+  filters: { inv: { q: '', from: '', to: '', cust: '', status: '' }, prod: { q: '', low: false }, khata: { q: '', onlyDue: false }, cust: { q: '', withLogin: false, sort: 'name' }, pay: { from: '', to: '' } },
   range: { from: addDaysISO(todayISO(), -29), to: todayISO() },
   open: { customerId: null, invoiceId: null, productId: null },
   bill: null,
@@ -1796,6 +1796,7 @@ const NAV = [
   { id: 'dash', label: 'Home', ic: 'dash' },
   { id: 'bill', label: 'New Bill', ic: 'bill' },
   { id: 'khata', label: 'Khata', ic: 'khata' },
+  { id: 'customers', label: 'Customers', ic: 'user' },
   { id: 'payments', label: 'Payment', ic: 'cash' },
   { id: 'products', label: 'Stock', ic: 'box' },
   { id: 'reports', label: 'Reports', ic: 'chart' },
@@ -2751,6 +2752,81 @@ ACTIONS['flt-khata'] = (el) => {
   if (el.dataset.f === 'q') { const i = document.querySelector('[data-f="q"]'); if (i) { i.focus(); i.setSelectionRange(i.value.length, i.value.length); } }
 };
 
+/* ------------------------- customers (add / edit / delete) -------------------------
+   The Khata tab is about money owed. This tab is about the customer records
+   themselves: create them, correct their details, and remove ones added by mistake.
+   ---------------------------------------------------------------------------------- */
+VIEWS.customers = function () {
+  const f = S.filters.cust;
+  let list = S.customers.slice();
+  if (f.q) {
+    const q = f.q.toLowerCase();
+    list = list.filter((c) => (c.name + ' ' + (c.phone || '') + ' ' + (c.area || '') + ' ' + (c.gstin || '')).toLowerCase().includes(q));
+  }
+  if (f.withLogin) list = list.filter((c) => c.portal);
+  list.sort((a, b) => {
+    if (f.sort === 'recent') return String(b.createdAt || '').localeCompare(String(a.createdAt || ''));
+    if (f.sort === 'balance') return customerBalance(b, S.invoices, S.payments) - customerBalance(a, S.invoices, S.payments);
+    return String(a.name).localeCompare(String(b.name));
+  });
+
+  const withLogins = S.customers.filter((c) => c.portal).length;
+  const noPhone = S.customers.filter((c) => !c.phone).length;
+
+  return `<div class="view">
+    ${card('', `
+      <div class="filters">
+        <div class="search-wrap">${icon('search')}<input placeholder="Search name, phone, area, GSTIN…" value="${esc(f.q)}" data-input="flt-cust" data-f="q" data-search-focus></div>
+        <label class="check"><input type="checkbox" ${f.withLogin ? 'checked' : ''} data-change="flt-cust" data-f="withLogin"> Only with app login</label>
+        <select data-change="flt-cust" data-f="sort">
+          <option value="name" ${f.sort === 'name' ? 'selected' : ''}>Sort: Name (A–Z)</option>
+          <option value="recent" ${f.sort === 'recent' ? 'selected' : ''}>Sort: Recently added</option>
+          <option value="balance" ${f.sort === 'balance' ? 'selected' : ''}>Sort: Highest balance</option>
+        </select>
+        <span class="spacer"></span>
+        <button class="btn primary" data-act="cust-modal">${icon('plus')} Add customer</button>
+        <button class="btn ghost" data-act="export-khata">${icon('download')} CSV</button>
+      </div>
+      <div class="stat-line">
+        <span><b>${S.customers.length}</b> customers</span>
+        <span><b>${withLogins}</b> with app login</span>
+        ${noPhone ? `<span><b class="warn-t">${noPhone}</b> without a phone number</span>` : ''}
+        ${f.q || f.withLogin ? `<span>showing <b>${list.length}</b></span>` : ''}
+      </div>
+    `)}
+
+    ${list.length ? card('', `<div class="list">
+      ${list.map((c) => {
+        const bal = customerBalance(c, S.invoices, S.payments);
+        const bills = S.invoices.filter((i) => i.customerId === c.id).length;
+        return `<div class="row">
+          <div class="avatar ${bal > 0 ? 'warn' : 'ok'}">${esc(String(c.name || '?').slice(0, 1).toUpperCase())}</div>
+          <div class="row-main" data-act="open-customer" data-id="${c.id}" style="cursor:pointer">
+            <b>${esc(c.name)} ${c.portal ? '<span class="pill ok" title="has app login">app login</span>' : ''}</b>
+            <small>${esc(c.phone || 'no phone')}${c.area ? ' · ' + esc(c.area) : ''} · ${bills} bill${bills === 1 ? '' : 's'}
+              ${bal > 0 ? ' · <b class="warn-t">' + money(bal) + ' due</b>' : bal < 0 ? ' · <b class="ok-t">' + money(-bal) + ' advance</b>' : ' · settled'}</small>
+          </div>
+          <div class="row-actions">
+            <button class="icon-btn" data-act="cust-modal" data-id="${c.id}" title="Edit customer">${icon('edit')}</button>
+            <button class="icon-btn" data-act="open-customer" data-id="${c.id}" title="Open khata">${icon('khata')}</button>
+            <button class="icon-btn danger" data-act="del-customer" data-id="${c.id}" title="Delete customer">${icon('trash')}</button>
+          </div>
+        </div>`;
+      }).join('')}
+    </div>`) : card('', emptyState(
+        f.q || f.withLogin ? 'No customer matches this search.' : 'No customers yet.',
+        'Add customer', 'cust-modal', 'user'))}
+
+    <p class="note-line">Deleting a customer keeps their bills and payments in your records — those entries simply stop being linked to a khata. Remove their app login first if they have one.</p>
+  </div>`;
+};
+
+ACTIONS['flt-cust'] = (el) => {
+  S.filters.cust[el.dataset.f] = el.type === 'checkbox' ? el.checked : el.value;
+  render();
+  if (el.dataset.f === 'q') { const i = document.querySelector('[data-f="q"]'); if (i) { i.focus(); i.setSelectionRange(i.value.length, i.value.length); } }
+};
+
 /* ------------------------- customer detail (khata page) ------------------------- */
 ACTIONS['open-customer'] = (el) => {
   const c = findCustomer(el.dataset.id);
@@ -2782,6 +2858,7 @@ ACTIONS['open-customer'] = (el) => {
         <button class="btn ghost" data-act="wa-statement" data-id="${c.id}">${icon('wa')} Send khata statement</button>
         <button class="btn ghost" data-act="print-statement" data-id="${c.id}">${icon('print')} Statement</button>
         <button class="btn ghost" data-act="cust-modal" data-id="${c.id}">${icon('edit')} Edit</button>
+        ${can('khata') ? `<button class="btn ghost danger" data-act="del-customer" data-id="${c.id}">${icon('trash')} Delete</button>` : ''}
       </div>
     </div>
 
@@ -2885,11 +2962,20 @@ ACTIONS['del-customer'] = async (el) => {
   if (!c) return;
   const bills = S.invoices.filter((i) => i.customerId === c.id).length;
   const bal = customerBalance(c, S.invoices, S.payments);
-  if (!confirm(`Delete customer ${c.name}?\n\nBills: ${bills}\nBalance: ${money(bal)}\n\nTheir bills and payments will stay in records but will no longer be linked to a khata.`)) return;
+  const warn = Math.abs(bal) > 0.004
+    ? `\n\n⚠️ This khata is NOT settled (${money(Math.abs(bal))} ${bal > 0 ? 'still to receive' : 'advance held'}).`
+    : '';
+  const loginWarn = c.portal
+    ? `\n\n⚠️ ${c.name} has an app login (${c.portal.username}). Deleting the customer does NOT delete their Firebase login — remove the login first, or delete the user in Firebase → Authentication afterwards.`
+    : '';
+  if (!confirm(`Delete customer ${c.name}?\n\nBills: ${bills}\nBalance: ${money(bal)}${warn}${loginWarn}\n\nTheir bills and payments will stay in records but will no longer be linked to a khata.\n\nThis cannot be undone.`)) return;
+  // Second confirmation when money or a login is involved — this is destructive
+  // and the row sits next to Edit, so a misclick is easy.
+  if ((warn || loginWarn) && !confirm(`Really delete ${c.name}?\n\nType-free final check — press OK only if you are sure.`)) return;
   await ACT.remove('customers', c.id, S, true);
   UI.closeModal();
   render();
-  UI.toast('Customer deleted');
+  UI.toast('Customer deleted' + (c.portal ? ' — their login still exists in Firebase → Authentication' : ''), c.portal ? 'warn' : 'ok', c.portal ? 8000 : 3000);
 };
 
 /* ------------------------- payments ------------------------- */
@@ -4631,7 +4717,7 @@ function sessionLabel() {
 
 /** Which permission a screen needs. null = everyone signed in. */
 const VIEW_PERMS = {
-  dash: null, bill: 'bill', khata: 'khata', payments: 'payment', products: 'stock',
+  dash: null, bill: 'bill', khata: 'khata', customers: 'khata', payments: 'payment', products: 'stock',
   reports: 'reports', invoices: 'bill', settings: 'settings', staff: 'staff'
 };
 function canOpenView(tab) {

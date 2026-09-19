@@ -12,7 +12,8 @@
     "test:all": "node tests/logic.test.mjs && node tests/e2e.mjs && node tests/smoke.mjs && node tests/whatsapp.mjs && node tests/portal.mjs && node tests/staff.mjs",
     "test:whatsapp": "node tests/whatsapp.mjs",
     "test:portal": "node tests/portal.mjs",
-    "test:staff": "node tests/staff.mjs"
+    "test:staff": "node tests/staff.mjs",
+    "test:live": "node tests/live.mjs"
   },
   "devDependencies": {
     "puppeteer": "^25.11.0"

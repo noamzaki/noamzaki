@@ -5,7 +5,7 @@
  */
 import puppeteer from 'puppeteer';
 
-const URL_BASE = 'http://localhost:8099/index.html';
+const URL_BASE = 'http://localhost:8099/index.html?local=1';
 let pass = 0, fail = 0;
 const ok = (n, c, extra = '') => { c ? (pass++, console.log('  ✓ ' + n)) : (fail++, console.log('  ✗ ' + n + (extra ? ' → ' + extra : ''))); };
 

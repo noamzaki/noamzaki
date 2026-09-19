@@ -56,7 +56,7 @@ async function walkTabs(page, label, shots) {
 /* ---------- 1. full shop ---------- */
 console.log('\nSmoke test — shop with data');
 let page = await newPage();
-await page.goto('http://localhost:8099/index.html', { waitUntil: 'networkidle2' });
+await page.goto('http://localhost:8099/index.html?local=1', { waitUntil: 'networkidle2' });
 await page.waitForSelector('#ob_name');
 await page.type('#ob_name', 'Smoke Test Traders');
 await page.click('[data-act="onboard-save"]');
@@ -103,7 +103,7 @@ const errs2 = [];
 page2.on('pageerror', (e) => errs2.push(e.message));
 page2.on('console', (m) => { if (m.type() === 'error') errs2.push(m.text()); });
 page2.errs = errs2;
-await page2.goto('http://localhost:8099/index.html', { waitUntil: 'domcontentloaded' });
+await page2.goto('http://localhost:8099/index.html?local=1', { waitUntil: 'domcontentloaded' });
 await page2.waitForSelector('#ob_name');
 await page2.type('#ob_name', 'Fresh Shop');
 await page2.evaluate(() => { document.getElementById('ob_demo').checked = false; });

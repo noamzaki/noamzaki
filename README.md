@@ -13,6 +13,15 @@ A complete billing app for a wholesale shop, built for how the shop actually run
 
 It is one self-contained HTML file. No server, no build step needed to run, no monthly cost.
 
+> **Live app:** <https://noamzaki.github.io/noamzaki/> — owner login from Firebase.
+> Want to try it without touching the cloud? Open
+> **<https://noamzaki.github.io/noamzaki/?local=1>** — that keeps everything in your browser
+> (Local mode), so you can click around freely.
+
+![Dashboard](screenshots/02-dashboard.png)
+![New bill](screenshots/04-bill.png)
+![Staff and permissions](screenshots/22-staff-list.png)
+
 ---
 
 ## 1. Quick start (local mode, 2 minutes)
@@ -301,7 +310,8 @@ tests/e2e.mjs           ← 40 end-to-end tests in real Chrome (billing, stock, 
 tests/smoke.mjs         ← 33 checks that every screen renders (full shop + empty shop)
 tests/whatsapp.mjs      ← 28 checks on the WhatsApp links (desktop/phone, drafts, reminders)
 tests/portal.mjs        ← 52 checks on the customer portal incl. privacy + rules safety
-tests/staff.mjs         ← 63 checks: roles, hidden money, refused actions, rules parity
+tests/staff.mjs         ← 64 checks: roles, hidden money, refused actions, rules parity
+tests/live.mjs          ← 15 checks against the DEPLOYED site (boot, Firebase, portal, no 404s)
 tools/setup-chrome.sh   ← one-shot Chrome + shared libraries for the test suites (Linux)
 docs/OWNER-GUIDE.md     ← one-page guide for the shop owner (Hinglish)
 docs/FIREBASE-SETUP.md  ← console walk-through: rules to paste, auth, domain, checklist
@@ -318,7 +328,12 @@ node tests/smoke.mjs
 node tests/whatsapp.mjs
 node tests/portal.mjs
 node tests/staff.mjs       # roles + permissions (one browser context per role)
+node tests/live.mjs        # checks the deployed site (no data touched)
 ```
+
+The browser suites add `?local=1` to the URL, so they always run in Local mode and never read or
+write your real Firebase project. `npm run test:live` checks the deployed site instead
+(needs internet; it only tries one deliberately-wrong login).
 
 On a fresh Linux box `npm install` + `bash tools/setup-chrome.sh` prepares Chrome for the browser
 tests (they need `LD_LIBRARY_PATH=$PWD/.cache/chromelibs`).
@@ -331,7 +346,7 @@ Edit files in `src/`, run `python3 build.py`, commit. `index.html` at the root i
 
 | Symptom | Fix |
 |---|---|
-| Yellow "Local mode" banner | `FIREBASE_CONFIG` in `index.html` is empty, or the page couldn't load the Firebase SDK (needs internet once). |
+| Yellow "Local mode" banner | `FIREBASE_CONFIG` in `index.html` is empty, or the page couldn't load the Firebase SDK (needs internet once). Note `?local=1` in the URL forces Local mode on purpose. |
 | Login says "domain not authorised" | Firebase → Authentication → Settings → Authorized domains → add your `github.io` domain. |
 | Login says "Email/Password sign-in is not enabled" | Enable it in Authentication → Sign-in method. |
 | Everyone can read my data | You left Firestore in test mode. Publish `firestore.rules` with your emails. |

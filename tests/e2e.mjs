@@ -10,7 +10,8 @@
 import puppeteer from 'puppeteer';
 import { mkdirSync } from 'node:fs';
 
-const URL_BASE = process.env.APP_URL || 'http://localhost:8099/index.html';
+// ?local=1 → this browser only, so the tests never touch the real Firebase project
+const URL_BASE = process.env.APP_URL || 'http://localhost:8099/index.html?local=1';
 const SHOTS = 'screenshots';
 mkdirSync(SHOTS, { recursive: true });
 

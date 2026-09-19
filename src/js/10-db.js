@@ -40,7 +40,16 @@ const DB = {
   _localWrite: null,
 
   isConfigured() {
-    return !!(FIREBASE_CONFIG.apiKey && FIREBASE_CONFIG.projectId);
+    return !!(FIREBASE_CONFIG.apiKey && FIREBASE_CONFIG.projectId) && !this.forceLocal();
+  },
+  /** `?local=1` (or localStorage wb_force_local=1) keeps everything on this device even
+   *  when Firebase keys are filled in — handy for trying the app out, demos and tests. */
+  forceLocal() {
+    try {
+      const q = new URLSearchParams(location.search);
+      if (q.get('local') === '1' || q.get('mode') === 'local') return true;
+      return localStorage.getItem('wb_force_local') === '1';
+    } catch (e) { return false; }
   },
 
   /* ---------------- local helpers ---------------- */

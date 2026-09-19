@@ -139,4 +139,7 @@ Aap har naukar/manager ko apna **alag login** de sakte ho — wo sirf utna hi ka
   chala jayega). Local mode me wahi jagah naya password daal ke Save kar do.
 * **Chhutti par gaya staff?** → Staff list me switch **OFF** kar do — login turant band.
 
-Poore technical steps **README.md** mein hain. Koi problem aaye to: **Settings** → Setup guide.
+**Aapki website:** https://noamzaki.github.io/noamzaki/
+
+Poore technical steps **README.md** mein hain. Firebase ke steps **docs/FIREBASE-SETUP.md** mein hain.
+Koi problem aaye to: **Settings** → Setup guide.

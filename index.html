@@ -984,8 +984,21 @@ function waUrl(phone, text) {
 function waOpen(phone, text) {
   const url = waUrl(phone, text);
   let win = null;
-  try { win = window.open(url, '_blank'); } catch (e) { win = null; }
-  if (!win) { try { location.href = url; } catch (e) { } }   // popup blocked → same tab
+  try { win = window.open(url, '_blank', 'noopener'); } catch (e) { win = null; }
+  // Popup blocked (win is null, or undefined in some in-app browsers): fall back to
+  // a real anchor click, which browsers allow far more readily than window.open,
+  // and only then to a same-tab navigation.
+  if (!win) {
+    try {
+      const a = document.createElement('a');
+      a.href = url; a.target = '_blank'; a.rel = 'noopener';
+      document.body.appendChild(a);
+      a.click();
+      a.remove();
+      win = true;
+    } catch (e) { win = null; }
+  }
+  if (!win) { try { location.href = url; } catch (e) { } }   // last resort → same tab
   if (S.settings.waAutoCopy) copyText(text);
   return url;
 }
@@ -2621,18 +2634,20 @@ function waPhoneModal(cust, text, what) {
     </div>`);
   S._waPending = { text, what };
 }
-ACTIONS['wa-phone-save'] = async (el) => {
+ACTIONS['wa-phone-save'] = (el) => {
   const cust = findCustomer(el.dataset.id);
   if (!cust) return;
   const phone = document.getElementById('wa_phone').value.trim();
   if (normPhone(phone, S.settings.countryCode).length < 10) return UI.toast('Enter a valid mobile number', 'warn');
   cust.phone = phone;
-  await ACT.save('customers', cust, S, true);
   const pending = S._waPending || {};
   S._waPending = null;
-  UI.closeModal();
-  render();
+  // Open WhatsApp SYNCHRONOUSLY, while we are still inside the click handler.
+  // Awaiting the save first would break the user-gesture chain and the browser
+  // would block window.open as a popup.
   sendWA(cust.id, pending.text || '', pending.what || '');
+  UI.closeModal();
+  ACT.save('customers', cust, S, true).then(() => render());
 };
 ACTIONS['wa-copy-now'] = async (el) => {
   const pending = S._waPending || {};

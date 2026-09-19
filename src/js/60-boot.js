@@ -205,7 +205,9 @@ function onSnapshotData(d) {
     const empty = !d.settingsExists && !(d.products || []).length && !(d.customers || []).length && !(d.invoices || []).length;
     if (empty && !_bootstrapped) { _bootstrapped = true; setTimeout(() => onboardingModal(), 400); }
   }
-  if (first && DB.mode === 'local' && !d.settings && !(d.products || []).length) {
+  // Local mode: onboard only when the device has never been set up. `seeded` is written by
+  // onboarding itself, so a half-finished or placeholder store cannot skip the setup screen.
+  if (first && DB.mode === 'local' && !(d.settings && d.settings.seeded) && !(d.products || []).length) {
     setTimeout(() => onboardingModal(), 400);
   }
 }
@@ -309,7 +311,9 @@ window.addEventListener('hashchange', () => location.reload());
       S.ready = true;
       render();
       setTimeout(restoreDraft, 300);
-      if (!S.settings.seeded) await ACT.saveSettings({ seeded: true }, S);
+      // NOTE: `seeded` is deliberately NOT set here. Onboarding sets it once the owner has
+      // actually named the shop — otherwise a visit that never finished setup would look
+      // "already set up" next time and the owner would land in an empty shop.
     }
   }
   // offline app shell

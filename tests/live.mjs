@@ -32,8 +32,8 @@ const EXPECTED = [
 const isExpected = (text) => EXPECTED.some((re) => re.test(String(text)));
 
 /** open a page and collect console errors / page errors / failed requests */
-async function open(url) {
-  const page = await browser.newPage();
+async function open(url, ctx) {
+  const page = ctx ? await ctx.newPage() : await browser.newPage();
   page.setDefaultTimeout(30000);
   await page.setViewport({ width: 1280, height: 1000 });
   const errors = [], warnings = [], failed = [];
@@ -98,6 +98,23 @@ const pstate = await portal.page.evaluate(() => ({
 }));
 ok('customer portal page loads with its login form', pstate.loginForm, JSON.stringify(pstate));
 ok('portal does not show a rules/permission error before any shop data exists', !pstate.rulesNotice, pstate.err || pstate.shopName);
+
+/* ---- the ?local=1 demo link (documented in the README) ----
+   Tested in its own browser context, i.e. exactly what a new visitor sees. */
+const demoCtx = await browser.createBrowserContext();
+const demo = await open(SITE + '?local=1', demoCtx);
+await demo.page.waitForFunction(() => typeof S !== 'undefined' && (S.ready || document.getElementById('ob_name')), { timeout: 30000 });
+// the onboarding dialog opens a moment after the app is ready — give it that moment
+await demo.page.waitForFunction(() => !!document.getElementById('ob_name'), { timeout: 8000 }).catch(() => { });
+const demoState = await demo.page.evaluate(() => ({
+  mode: DB.mode,
+  onboarding: !!document.getElementById('ob_name'),
+  login: !!document.getElementById('lg_email'),
+  banner: (document.querySelector('.banner, .conn') || {}).innerText || ''
+}));
+ok('the ?local=1 demo link opens a fresh shop on the device (no cloud)', demoState.mode === 'local' && demoState.onboarding && !demoState.login, JSON.stringify(demoState));
+ok('it says so plainly (Local mode banner)', /Local mode/i.test(demoState.banner), demoState.banner.slice(0, 70));
+ok('no errors on the demo link either', demo.errors.length === 0, demo.errors.slice(0, 2).join(' | '));
 
 /* ---- static assets ---- */
 const asset = async (p) => (await page.evaluate(async (u) => (await fetch(u, { cache: 'no-store' })).status, p));

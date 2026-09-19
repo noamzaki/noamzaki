@@ -1,0 +1,20 @@
+{
+  "name": "wholesale-billing",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Billing + khata (credit ledger) + auto stock management for a wholesale store. Single-file app, hostable on GitHub Pages with Firebase backend.",
+  "scripts": {
+    "build": "python3 build.py",
+    "serve": "python3 -m http.server 8099 --bind 0.0.0.0",
+    "test": "node tests/logic.test.mjs",
+    "test:e2e": "node tests/e2e.mjs",
+    "test:smoke": "node tests/smoke.mjs",
+    "test:all": "node tests/logic.test.mjs && node tests/e2e.mjs && node tests/smoke.mjs && node tests/whatsapp.mjs && node tests/portal.mjs && node tests/staff.mjs",
+    "test:whatsapp": "node tests/whatsapp.mjs",
+    "test:portal": "node tests/portal.mjs",
+    "test:staff": "node tests/staff.mjs"
+  },
+  "devDependencies": {
+    "puppeteer": "^25.11.0"
+  }
+}

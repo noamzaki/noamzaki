@@ -1,0 +1,138 @@
+rules_version = '2';
+
+// ─────────────────────────────────────────────────────────────────────────────
+//  Firestore security rules — Wholesale Store Billing + Customer Portal
+//  Paste this in:  Firebase → Firestore Database → Rules → Publish
+//
+//  What these rules do
+//   1. Only YOUR account (the first one that signs in claims ownership) and the
+//      staff logins you create in the app can read/write the shop data.
+//   2. A customer who logs in to the portal can read ONLY their own customer
+//      record, their own bills and their own payments. Nothing else.
+//   2b. Staff follow the permissions you tick on the Staff screen: the same
+//      can('bill' | 'stock' | ...) checks run here, on the server, so a disabled
+//      switch or unticked box cannot be bypassed from another device.
+//   3. The shop's name/phone/address is public so the portal login page can show it.
+// ─────────────────────────────────────────────────────────────────────────────
+service cloud.firestore {
+  match /databases/{database}/documents {
+
+    // ── the owner(s): uids listed in settings/main.ownerUids ────────────────
+    //    The first account that signs in claims ownership; you can add more
+    //    uids there by hand (Firebase → Firestore → settings/main → ownerUids).
+    function ownerUids() {
+      return get(/databases/$(database)/documents/settings/main).data.ownerUids;
+    }
+    function isOwner() {
+      return request.auth != null && request.auth.uid in ownerUids();
+    }
+
+    // ── staff members: a staff/{their-uid} document created by the owner ────
+    function staffDoc() {
+      return get(/databases/$(database)/documents/staff/$(request.auth.uid)).data;
+    }
+    function hasStaffDoc() {
+      return request.auth != null && exists(/databases/$(database)/documents/staff/$(request.auth.uid));
+    }
+    function isShopUser() {
+      return isOwner() || (hasStaffDoc() && staffDoc().active == true);
+    }
+    // may this signed-in person do `perm`?  (owner can do everything)
+    function can(perm) {
+      return isOwner() || (hasStaffDoc() && staffDoc().active == true && staffDoc().perms[perm] == true);
+    }
+
+    // ── who is the customer we are looking at ────────────────────────────────
+    // The customer record stores the customer's Firebase uid in `authUid`
+    // (the app fills it in when you create their login).
+    function isMeCustomerDoc(customerId) {
+      return request.auth != null
+        && get(/databases/$(database)/documents/customers/$(customerId)).data.authUid == request.auth.uid;
+    }
+
+    // ── staff records: the owner manages them, an employee may read their own ──
+    match /staff/{uid} {
+      allow read: if isOwner() || (request.auth != null && request.auth.uid == uid);
+      allow write: if isOwner();
+    }
+
+    // ── 1. shop data, permission by permission ──────────────────────────────
+    match /settings/{doc} {
+      // the very first signed-in account claims ownership
+      allow create: if request.auth != null && !exists(/databases/$(database)/documents/settings/main)
+        && request.auth.uid in request.resource.data.ownerUids;
+      allow read: if isShopUser();
+      allow update, delete: if isOwner();
+    }
+    match /products/{doc} {
+      allow read: if isShopUser();
+      allow write: if can('stock');
+    }
+    match /moves/{doc} {
+      allow read: if can('stock') || can('reports');
+      // billing writes sale movements, stock work writes the rest
+      allow create: if can('bill') || can('stock');
+      allow update, delete: if can('stock');
+    }
+    match /customers/{doc} {
+      allow read: if isShopUser();               // billing needs names/balances
+      allow write: if can('khata') || can('bill');
+      allow delete: if isOwner();
+    }
+    match /invoices/{doc} {
+      allow read: if isShopUser();
+      allow create: if can('bill');
+      // editing an existing bill is the same privilege as deleting it (the app
+      // hides the Edit button without deleteBill, so the rules match the screen)
+      allow update: if can('deleteBill');
+      allow delete: if can('deleteBill');
+    }
+    match /payments/{doc} {
+      allow read: if isShopUser();
+      allow create: if can('payment') || can('bill');   // "received now" while billing
+      allow delete: if can('deletePayment');
+      allow update: if false;
+    }
+
+    // ── 2. customer portal: read-only, own records only ─────────────────────
+    //    (these rules come after the staff ones: a customer account has no
+    //     staff document, so can()/isShopUser() are false for them)
+    match /customers/{customerId} {
+      // the portal app queries: where('authUid','==', myUid)
+      allow read: if request.auth != null && resource.data.authUid == request.auth.uid;
+      allow write: if false;                                  // customers never change anything
+    }
+    match /invoices/{invoiceId} {
+      // the portal app queries: where('customerId','==', myCustomerDocId)
+      allow read: if isMeCustomerDoc(resource.data.customerId);
+      allow write: if false;
+    }
+    match /payments/{paymentId} {
+      allow read: if isMeCustomerDoc(resource.data.customerId);
+      allow write: if false;
+    }
+
+    // ── 3. public shop card (only name/phone/address — the same details that
+    //      are printed on every bill). Staff can update it from Settings.
+    match /portal_shop/{doc} {
+      allow read: if true;
+      allow write: if can('settings') || isOwner();
+    }
+
+    // products / moves / settings and everything else: staff only (covered above).
+  }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+//  Notes
+//  • Staff logins must NOT use the same email as a customer login. Customer
+//    logins are created by the app as  <id>@customers.wholesale-billing.app
+//    (or whatever you set in window.PORTAL_DOMAIN), so they can never collide
+//    with your own address.
+//  • Add or change staff inside the app (Staff screen) — it creates the Firebase
+//    accounts and the staff/{uid} documents these rules read. Nothing to edit here.
+//  • To make someone else an owner, add their uid to settings/main.ownerUids.
+//  • Never use  allow read, write: if true  — customers' balances and your
+//    sales would be public.
+//  • Changing these rules only affects the app AFTER you press Publish.
+// ─────────────────────────────────────────────────────────────────────────────

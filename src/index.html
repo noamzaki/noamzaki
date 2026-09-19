@@ -1,0 +1,47 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Wholesale Store Billing</title>
+<meta name="theme-color" content="#115e59">
+<meta name="description" content="Billing, khata (credit ledger) and stock management for a wholesale store.">
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 64 64'%3E%3Crect width='64' height='64' rx='14' fill='%230f766e'/%3E%3Ctext x='32' y='45' font-size='38' font-family='Arial' font-weight='bold' fill='white' text-anchor='middle'%3E%E2%82%B9%3C/text%3E%3C/svg%3E">
+<link rel="stylesheet" href="./styles.css">
+</head>
+<body>
+
+<!-- ═══════════════════════════════════════════════════════════════════
+     STEP 1 — PASTE YOUR FIREBASE CONFIG HERE
+     Firebase console → Project settings (⚙️) → Your apps → Web app →
+     copy the firebaseConfig values into the object below.
+     Leave it empty to run in LOCAL mode (data stays in this browser).
+     ═══════════════════════════════════════════════════════════════════ -->
+<script>
+window.FIREBASE_CONFIG = {
+  apiKey: "AIzaSyAPuemGKbn0AOSI0IARb1lVIsKk5lMpGr0",
+  authDomain: "noamzaki-shop.firebaseapp.com",
+  projectId: "noamzaki-shop",
+  storageBucket: "noamzaki-shop.firebasestorage.app",
+  messagingSenderId: "288525025295",
+  appId: "1:288525025295:web:e3b60e9d579f57e138a37a"
+};
+
+/* Customer portal: the login IDs you create (e.g. "ramesh123") become real Firebase
+   logins at this domain. You can leave it as it is, or use your own domain — it is
+   never emailed, so it does not have to exist.                                   */
+window.PORTAL_DOMAIN = "customers.wholesale-billing.app";
+</script>
+
+<div id="app"></div>
+<div id="hdr" class="hdr"></div>
+<nav id="nav" class="nav"></nav>
+<main id="view"></main>
+<div id="modal-host"></div>
+<div id="toasts"></div>
+<div id="print-root"></div>
+
+<!-- app scripts (concat order matters: core → db → ui → shell → views → boot) -->
+<script src="./js/app.bundle.js"></script>
+</body>
+</html>

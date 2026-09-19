@@ -1,0 +1,16 @@
+# dependencies & tooling
+node_modules/
+.cache/
+.tmp-test/
+.tmp-downloads/
+__pycache__/
+
+# build output of the dev bundle (index.html at the root IS committed)
+src/js/app.bundle.js
+
+# local-only junk (browser profile, test downloads, caches)
+Downloads/
+.config/
+.local/
+.npm/
+.arena/

@@ -4748,6 +4748,9 @@ async function createStaffLogin({ name, email, password, role, customPerms, phon
     const rec = {
       id: uidNew, uid: uidNew, name, email: String(email).toLowerCase(), phone: phone || '',
       role, customPerms: role === 'custom' ? customPerms : null, active: true,
+      // firestore.rules reads staffDoc().perms[...] on the server, so the resolved
+      // permission map must be stored too — role/customPerms alone is not enough.
+      perms: permsForRole(role, customPerms),
       mode: 'firebase', createdBy: (DB.user && DB.user.email) || '', createdAt: new Date().toISOString()
     };
     await ACT.save('staff', rec, S, true);       // doc id = auth uid → the rules use it
@@ -4890,6 +4893,7 @@ ACTIONS['staff-save'] = async (el) => {
     } else {
       existing.name = name; existing.phone = phone; existing.role = role;
       existing.customPerms = role === 'custom' ? customPerms : null;
+      existing.perms = permsForRole(role, customPerms);   // keep the server-side map in sync
       if (String(pass).length >= 6 && DB.mode !== 'firebase') {
         const salt = newSalt();
         existing.pinSalt = salt;

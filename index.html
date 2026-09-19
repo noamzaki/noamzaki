@@ -1398,7 +1398,15 @@ const PORTAL_DB = {
     // the customer doc the rules link to this auth account
     let customer = null;
     try {
-      const qs = await getDocs(query(collection(inst.db, 'customers'), where('authUid', '==', uid)));
+      // new records store authUid at the top level; older ones only inside portal.authUid
+      let qs = await getDocs(query(collection(inst.db, 'customers'), where('authUid', '==', uid)));
+      if (qs.empty) {
+        qs = await getDocs(query(collection(inst.db, 'customers'), where('portal.authUid', '==', uid)));
+      }
+      if (qs.empty) {
+        const email = (inst.auth.currentUser && inst.auth.currentUser.email) || '';
+        if (email) qs = await getDocs(query(collection(inst.db, 'customers'), where('portal.email', '==', email)));
+      }
       if (!qs.empty) customer = { id: qs.docs[0].id, ...qs.docs[0].data() };
     } catch (e) {
       console.error(e);
@@ -1812,7 +1820,7 @@ function receivableTotal() {
   return round2(S.customers.reduce((s, c) => s + Math.max(0, customerBalance(c, S.invoices, S.payments)), 0));
 }
 function advanceTotal() {
-  return round2(S.customers.reduce((c, x) => s + Math.min(0, customerBalance(c, S.invoices, S.payments)), 0));
+  return round2(S.customers.reduce((s, c) => s + Math.min(0, customerBalance(c, S.invoices, S.payments)), 0));
 }
 
 function clearShell() {
@@ -4086,14 +4094,22 @@ function portalApplyData(d) {
   if (d.error === 'not-signed-in') { S.portalUser = null; PORTAL.busy = false; renderPortal(); return; }
   if (d.error === 'no-customer') {
     PORTAL.error = 'This login is not linked to a customer yet. Please ask the shop to create your login again.';
-    S.portalUser = null; S.portalLoading = false; renderPortal(); return;
+    S.portalUser = null; S.portalLoading = false; PORTAL.busy = false; renderPortal(); return;
   }
   if (d.error === 'rules') {
     PORTAL.error = 'The shop needs to publish the updated security rules (firestore.rules) before logins work.';
-    S.portalUser = null; S.portalLoading = false; renderPortal(); return;
+    S.portalUser = null; S.portalLoading = false; PORTAL.busy = false; renderPortal(); return;
+  }
+  if (d.customer && d.customer.portal && d.customer.portal.active === false) {
+    PORTAL.error = 'This login has been switched off by the shop.';
+    S.portalUser = null; S.portalLoading = false; PORTAL.busy = false;
+    try { PORTAL_DB.signOut(); } catch (e) { }
+    renderPortal(); return;
   }
   S.portalData = d;
   S.portalLoading = false;
+  PORTAL.busy = false;
+  PORTAL.error = '';
   // make the portal look like a shop with exactly one customer, so all existing
   // helpers (ledger, allocation, printing) work untouched
   S.settings = { ...DEFAULT_SETTINGS, ...(d.shop || {}), ...(S.portalShopCache || {}) };
@@ -4389,6 +4405,7 @@ ACTIONS['portal-create'] = async (el) => {
   try {
     UI.toast('Creating login…', 'ok', 1500);
     const created = await PORTAL_DB.createLogin(id, pw);
+    c.authUid = created.uid || '';          // top-level: this is what the portal query looks for
     c.portal = {
       username: id, email: created.email, authUid: created.uid || '', active: true,
       mode: created.local ? 'local' : 'firebase',
@@ -4463,7 +4480,10 @@ ACTIONS['portal-remove-confirm'] = async (el) => {
     const res = await PORTAL_DB.deleteLogin(c.portal.username, pw);
     warning = res && res.warning ? res.warning : '';
   }
-  delete c.portal;
+  // NOTE: writes use setDoc(merge:true), so `delete c.portal` alone would leave the
+  // old portal object in Firestore. Write explicit nulls so the removal actually syncs.
+  c.portal = null;
+  c.authUid = '';                    // must clear, or the old Firebase account still resolves to this customer
   await ACT.save('customers', c, S, true);
   UI.closeModal();
   UI.toast(warning ? warning : 'Login removed for ' + c.name, warning ? 'warn' : 'ok', warning ? 9000 : 3000);

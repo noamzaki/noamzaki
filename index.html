@@ -2831,6 +2831,146 @@ function invoicePdfOps(inv, S, helpers) {
   return ops;
 }
 
+/* ---------- OCR: read a payment screenshot ---------- */
+/* Tesseract.js is loaded from a CDN only when the owner actually uses this
+   feature, so the app still starts (and works offline) without it. */
+const OCR_CDN = 'https://cdn.jsdelivr.net/npm/tesseract.js@5.1.1/dist/tesseract.min.js';
+let _ocrLoading = null;
+function ensureOcr() {
+  if (typeof Tesseract !== 'undefined') return Promise.resolve(true);
+  if (_ocrLoading) return _ocrLoading;
+  _ocrLoading = new Promise((resolve, reject) => {
+    const s = document.createElement('script');
+    s.src = OCR_CDN;
+    s.onload = () => resolve(true);
+    s.onerror = () => { _ocrLoading = null; reject(new Error('Could not load the text-reader (needs internet the first time).')); };
+    document.head.appendChild(s);
+  });
+  return _ocrLoading;
+}
+
+/**
+ * Pull a payment out of OCR text from a UPI / bank screenshot.
+ * Returns { amount, date, ref, mode, payeeHint, confidence, lines }.
+ * Everything is a SUGGESTION — the caller must confirm before saving.
+ */
+function parsePaymentText(raw) {
+  const text = String(raw || '').replace(/\r/g, '');
+  const lines = text.split('\n').map((l) => l.trim()).filter(Boolean);
+  const flat = lines.join('\n');
+
+  // ---- amount -------------------------------------------------------------
+  // OCR rarely gets the rupee glyph right: it comes back as %, ¥, 2, R, Rs, INR
+  // or nothing at all. So we look for number SHAPES and score them by context
+  // instead of trusting any currency symbol.
+  const amountRe = /(?:^|[^\d])((?:\d{1,3}(?:,\d{2,3})+|\d+)(?:\.\d{1,2})?)(?![\d,])/g;
+  const candidates = [];
+  lines.forEach((line, li) => {
+    const low = line.toLowerCase();
+    let m;
+    amountRe.lastIndex = 0;
+    while ((m = amountRe.exec(line)) !== null) {
+      const rawNum = m[1];
+      const val = round2(parseFloat(rawNum.replace(/,/g, '')));
+      if (!(val > 0)) continue;
+
+      let score = 0;
+      // a currency marker immediately before the number (incl. common OCR slips)
+      const before = line.slice(0, m.index + 1);
+      if (/(?:rs\.?|inr|₹|%|¥|\bR\b)\s*$/i.test(before)) score += 40;
+      // thousands separator or exactly two decimals looks like money
+      if (/,/.test(rawNum)) score += 25;
+      if (/\.\d{2}$/.test(rawNum)) score += 20;
+      // near the top of a receipt = usually the headline amount
+      score += Math.max(0, 6 - li);
+      // words that surround the real amount
+      if (/paid|sent|received|amount|successful|debited|credited|transferred/.test(low)) score += 15;
+      // "Total paid" beats an individual line item or a fee on the same receipt
+      if (/\btotal\b|\bgrand\b|\bnet\s+(?:paid|amount)\b/.test(low)) score += 60;
+      // "Amount" alone is often a sub-total line when a Total exists elsewhere
+      if (/\bamount\b/.test(low) && !/total|paid|net/.test(low) && /total/i.test(text)) score -= 30;
+      if (/\bfee\b|\bcharge|\btax\b|\bgst\b|\bcashback\b|\bbalance\b/.test(low)) score -= 35;
+      // masked account / card tails like ••1234 or xxxx1234 are not amounts
+      if (/[•*x#]{2,}\s*$/i.test(before) || /(?:a\/c|acct|account|card)\b/.test(low)) score -= 55;
+      // things that are definitely NOT the amount
+      if (/id|ref|txn|transaction|order|utr|account|a\/c|upi id|\bvpa\b/.test(low)) score -= 60;
+      // A bare run of 7+ digits with no separator/decimal is an id, never an amount.
+      const bare = rawNum.replace(/[.,]/g, '');
+      if (bare.length >= 7 && !/[.,]/.test(rawNum)) continue;
+      if (bare.length >= 6 && !/[.,]/.test(rawNum)) score -= 60;
+      if (/^\d{4}$/.test(rawNum) && /20\d\d/.test(rawNum)) score -= 30; // a year
+      if (/\b(am|pm)\b/.test(low) && !/paid|amount/.test(low)) score -= 15;
+      if (val > 10000000) score -= 40;
+
+      candidates.push({ value: val, score, line, raw: rawNum });
+    }
+  });
+  candidates.sort((a, b) => b.score - a.score || b.value - a.value);
+  const best = candidates[0] || null;
+
+  // ---- date ---------------------------------------------------------------
+  const MON = { jan:0,feb:1,mar:2,apr:3,may:4,jun:5,jul:6,aug:7,sep:8,sept:8,oct:9,nov:10,dec:11 };
+  let date = '';
+  const pad = (n) => String(n).padStart(2, '0');
+  const iso = (y, mo, d) => `${y}-${pad(mo + 1)}-${pad(d)}`;
+  let dm = flat.match(/\b(\d{1,2})\s+([A-Za-z]{3,9})\.?\s+(\d{4})\b/);
+  if (dm && MON[dm[2].toLowerCase().slice(0, 4)] !== undefined) {
+    date = iso(+dm[3], MON[dm[2].toLowerCase().slice(0, 4)], +dm[1]);
+  } else if ((dm = flat.match(/\b([A-Za-z]{3,9})\.?\s+(\d{1,2}),?\s+(\d{4})\b/)) && MON[dm[1].toLowerCase().slice(0, 4)] !== undefined) {
+    date = iso(+dm[3], MON[dm[1].toLowerCase().slice(0, 4)], +dm[2]);
+  } else if ((dm = flat.match(/\b(\d{1,2})[\/\-.](\d{1,2})[\/\-.](\d{2,4})\b/))) {
+    let y = +dm[3]; if (y < 100) y += 2000;
+    date = iso(y, +dm[2] - 1, +dm[1]);            // day-first (Indian convention)
+  } else if ((dm = flat.match(/\b(\d{4})-(\d{2})-(\d{2})\b/))) {
+    date = `${dm[1]}-${dm[2]}-${dm[3]}`;
+  }
+
+  // ---- reference ----------------------------------------------------------
+  let ref = '';
+  const refM = flat.match(/(?:UPI\s*(?:transaction|txn|ref)?\s*(?:id|no\.?)?|transaction\s*(?:id|no\.?)|txn\s*(?:id|no\.?)|UTR|order\s*id|ref(?:erence)?\s*(?:id|no\.?)?)\s*[:#-]?\s*([A-Za-z0-9]{6,30})/i);
+  if (refM) ref = refM[1];
+  else { const l = flat.match(/\b(\d{9,22})\b/); if (l) ref = l[1]; }
+
+  // ---- mode ---------------------------------------------------------------
+  let mode = '';
+  if (/upi|gpay|google pay|phonepe|phone pe|paytm|bhim|amazon pay|cred/i.test(flat)) mode = 'UPI';
+  else if (/imps|neft|rtgs|bank transfer|net ?banking|a\/c|account/i.test(flat)) mode = 'Bank';
+  else if (/cheque|check no/i.test(flat)) mode = 'Cheque';
+  else if (/cash/i.test(flat)) mode = 'Cash';
+
+  // ---- who it was paid to -------------------------------------------------
+  let payeeHint = '';
+  // match within a single line only — [\s] would otherwise run across newlines
+  for (const line of lines) {
+    const pm = line.match(/(?:paid\s+to|sent\s+to|to\s+account|transferred\s+to|received\s+from|^to)\s*[:\-]?\s*([A-Za-z][A-Za-z0-9&.'\- ]{2,40})/i);
+    if (pm) { payeeHint = pm[1].trim().replace(/\s{2,}/g, ' '); break; }
+  }
+
+  // ---- confidence ---------------------------------------------------------
+  let confidence = 'low';
+  if (best) {
+    const runnerUp = candidates[1];
+    const gap = runnerUp ? best.score - runnerUp.score : 999;
+    const clear = gap >= 25;
+    if (best.score >= 55 && clear) confidence = 'high';
+    else if (best.score >= 30) confidence = 'medium';
+    // Two plausible numbers within a few points: force a human choice.
+    if (runnerUp && gap < 10 && runnerUp.value !== best.value) confidence = 'ambiguous';
+  }
+  const success = /success|paid|completed|credited|debited/i.test(flat);
+  const failed = /fail|declin|cancel|pending|unsuccessful/i.test(flat);
+
+  return {
+    amount: best ? best.value : 0,
+    date, ref, mode: mode || 'UPI', payeeHint,
+    confidence: failed ? 'low' : confidence,
+    looksSuccessful: success && !failed,
+    looksFailed: failed,
+    candidates: candidates.slice(0, 5),
+    lines
+  };
+}
+
 /* ---------- PDF: build, download, share ---------- */
 
 /** Helpers the layout function needs, bound to the live app state. */
@@ -3191,6 +3331,7 @@ ACTIONS['open-customer'] = (el) => {
       </div>
       <div class="modal-actions sticky-top">
         <button class="btn primary" data-act="pay-modal" data-cust="${c.id}">${icon('cash')} Record payment</button>
+        <button class="btn ghost" data-act="pay-scan" data-cust="${c.id}">${icon('search')} From screenshot</button>
         <button class="btn ghost" data-act="bill-for-customer" data-id="${c.id}">${icon('bill')} New bill</button>
         <button class="btn ghost" data-act="wa-reminder" data-id="${c.id}">${icon('wa')} Payment reminder</button>
         <button class="btn ghost" data-act="wa-statement" data-id="${c.id}">${icon('wa')} Send khata statement</button>
@@ -3375,6 +3516,107 @@ function payModalRefresh(custId) {
   const amt = num((document.getElementById('pm_amt') || {}).value);
   payModal({ customerId: custId, amount: amt || null });
 }
+/* ------------------- payment from a screenshot (OCR) ------------------- */
+
+/** Step 1 — ask for the image. */
+ACTIONS['pay-scan'] = () => {
+  if (!requirePerm('payment', 'record payments')) return;
+  UI.openModal('Read payment from screenshot', `
+    <p class="pad-top">Upload the UPI / bank confirmation the customer sent you (GPay, PhonePe, Paytm, bank SMS screenshot…).
+      The app reads the amount and date from it and <b>shows you everything to confirm before anything is saved</b>.</p>
+    <div class="form-grid">
+      <label class="fld wide"><span>Screenshot</span>
+        <input id="oc_file" type="file" accept="image/*" data-change="pay-scan-run"></label>
+      <label class="fld wide"><span>Customer (you can also pick this after reading)</span>
+        <select id="oc_cust">${customerOptions('')}</select></label>
+    </div>
+    <div id="oc_status" class="note-line"></div>
+    <p class="note-line">The image is read <b>on this device</b> — it is never uploaded anywhere. Nothing is saved to the khata until you press Confirm.</p>
+    <div class="modal-actions">
+      <button class="btn ghost" data-act="modal-close">Cancel</button>
+    </div>`);
+};
+
+/** Step 2 — run OCR, then hand over to the confirm screen. */
+ACTIONS['pay-scan-run'] = async (el) => {
+  const file = el.files && el.files[0];
+  if (!file) return;
+  const custSel = document.getElementById('oc_cust');
+  const custId = custSel ? custSel.value : '';
+  const status = document.getElementById('oc_status');
+  const say = (m) => { if (status) status.innerHTML = m; };
+  if (!/^image\//.test(file.type)) return say('<b class="warn-t">That is not an image file.</b>');
+  if (file.size > 12 * 1024 * 1024) return say('<b class="warn-t">Image is too large (max 12 MB).</b>');
+
+  say('Loading the text reader…');
+  try { await ensureOcr(); }
+  catch (e) { return say('<b class="warn-t">' + esc(e.message) + '</b>'); }
+
+  say('Reading the screenshot… <b>0%</b>');
+  let text = '';
+  try {
+    const res = await Tesseract.recognize(file, 'eng', {
+      logger: (m) => {
+        if (m.status === 'recognizing text') say('Reading the screenshot… <b>' + Math.round((m.progress || 0) * 100) + '%</b>');
+      }
+    });
+    text = (res && res.data && res.data.text) || '';
+  } catch (e) {
+    console.error(e);
+    return say('<b class="warn-t">Could not read that image. Try a clearer, uncropped screenshot.</b>');
+  }
+  const parsed = parsePaymentText(text);
+  payScanConfirm(parsed, custId, text, file);
+};
+
+/** Step 3 — always show what was found and make the owner confirm it. */
+function payScanConfirm(p, custId, rawText, file) {
+  // try to match the payee name the screenshot mentions to a saved customer
+  let guessId = custId;
+  if (!guessId && p.payeeHint) {
+    const hint = p.payeeHint.toLowerCase().replace(/[^a-z0-9 ]/g, '').trim();
+    const hit = S.customers.find((c) => {
+      const n = String(c.name || '').toLowerCase().replace(/[^a-z0-9 ]/g, '').trim();
+      return n && (n === hint || hint.includes(n) || n.includes(hint));
+    });
+    if (hit) guessId = hit.id;
+  }
+  const conf = p.confidence;
+  const badge = conf === 'high' ? '<span class="pill ok">read clearly</span>'
+    : conf === 'medium' ? '<span class="pill warn">please double-check</span>'
+    : conf === 'ambiguous' ? '<span class="pill warn">more than one amount found</span>'
+    : '<span class="pill bad">could not read it properly</span>';
+
+  const alts = (p.candidates || []).filter((c) => c.value !== p.amount).slice(0, 3);
+
+  UI.openModal('Confirm this payment', `
+    ${p.looksFailed ? `<div class="warn-box">${icon('warn')}<span><b>This screenshot looks like a FAILED or pending payment.</b> Do not record it unless you are sure the money arrived.</span></div>` : ''}
+    <p class="pad-top">This is what the app read from the image ${badge}. Check every line against the screenshot — correct anything that is wrong.</p>
+    <div class="form-grid">
+      <label class="fld wide"><span>Customer *</span>
+        <select id="pm_cust">${customerOptions(guessId)}</select></label>
+      <label class="fld"><span>Amount ${CUR} *</span>
+        <input id="pm_amt" type="number" step="any" min="0" inputmode="decimal" value="${p.amount || ''}"></label>
+      <label class="fld"><span>Date</span><input id="pm_date" type="date" value="${p.date || todayISO()}"></label>
+      <label class="fld"><span>Mode</span>
+        <select id="pm_mode">${(S.settings.paymentModes || ['Cash', 'UPI', 'Bank', 'Cheque']).map((m) => `<option ${m === (p.mode || 'UPI') ? 'selected' : ''}>${esc(m)}</option>`).join('')}</select></label>
+      <label class="fld"><span>Reference</span><input id="pm_note" value="${esc(p.ref ? (p.mode || 'UPI') + ' ' + p.ref : '')}"></label>
+      <input type="hidden" id="pm_inv" value="">
+      <input type="hidden" id="pm_from_ocr" value="1">
+    </div>
+    ${alts.length ? `<p class="note-line">Other numbers on the image: ${alts.map((a) => `<button class="chip" data-act="pay-set-amt" data-v="${a.value}">${money(a.value)}</button>`).join(' ')}</p>` : ''}
+    ${!p.amount ? `<div class="warn-box">${icon('warn')}<span>No amount could be read — type it in yourself.</span></div>` : ''}
+    ${p.payeeHint ? `<p class="note-line">Screenshot says paid to: <b>${esc(p.payeeHint)}</b>${guessId ? '' : ' — no matching customer found, please pick one.'}</p>` : ''}
+    <details class="pad-top"><summary class="note-line">Show the raw text that was read</summary>
+      <pre class="code" style="white-space:pre-wrap;max-height:180px;overflow:auto">${esc(rawText || '(nothing)')}</pre></details>
+    <div class="modal-actions">
+      <button class="btn primary" data-act="pay-save">${icon('check')} Confirm & save payment</button>
+      <button class="btn ghost" data-act="pay-scan">${icon('back')} Try another image</button>
+      <button class="btn ghost" data-act="modal-close">Cancel</button>
+    </div>
+    <p class="note-line">Nothing has been saved yet. Pressing Confirm records it against the khata and reduces the balance.</p>`);
+}
+
 ACTIONS['pay-modal'] = (el) => payModal({
   customerId: (el.dataset && el.dataset.cust) || S.open.customerId || '',
   invoiceId: (el.dataset && el.dataset.inv) || '',
@@ -3408,6 +3650,8 @@ ACTIONS['pay-save'] = async (el) => {
     pay.editedBy = (DB.user && DB.user.email) || 'local';
     pay.editedAt = new Date().toISOString();
   }
+  // mark entries that started from a screenshot, so they can be audited later
+  if (document.getElementById('pm_from_ocr')) pay.source = 'screenshot';
   await ACT.savePayment(pay, S);
   UI.closeModal();
   render();
@@ -3587,6 +3831,7 @@ VIEWS.payments = function () {
     ${card('', `
       <div class="filters">
         <button class="btn primary" data-act="pay-modal">${icon('cash')} Record payment</button>
+        <button class="btn ghost" data-act="pay-scan">${icon('search')} Read from screenshot</button>
         <button class="btn ghost" data-act="print-day-close">${icon('print')} Day-close summary</button>
         <label class="fld sm"><span>From</span><input type="date" value="${from}" data-input="flt-pay" data-f="from"></label>
         <label class="fld sm"><span>To</span><input type="date" value="${to}" data-input="flt-pay" data-f="to"></label>

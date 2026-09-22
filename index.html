@@ -1536,7 +1536,11 @@ const ACT = {
 
   /** Create or update an invoice + adjust stock + write stock movements */
   async saveInvoice(inv, state, isEdit) {
-    const prev = isEdit ? state.invoices.find((x) => x.id === inv.id) : null;
+    // Deep-copy the stored version BEFORE writing the new one: save() replaces the
+    // entry in state.invoices, and if the caller happened to hand us the very same
+    // object we would otherwise "reverse" the new quantities instead of the old.
+    const found = isEdit ? state.invoices.find((x) => x.id === inv.id) : null;
+    const prev = found ? JSON.parse(JSON.stringify(found)) : null;
     const saved = await this.save('invoices', inv, state, true);
 
     // reverse stock of the previous version first (edit case)
@@ -1641,8 +1645,9 @@ const ACT = {
   },
 
   async savePayment(pay, state) {
+    const isEdit = state.payments.some((x) => x.id === pay.id);
     await this.save('payments', pay, state, true);
-    UI.toast(`Payment ${money(pay.amount)} recorded ✓`);
+    UI.toast(`Payment ${money(pay.amount)} ${isEdit ? 'updated' : 'recorded'} ✓`);
     return pay;
   }
 };
@@ -3227,8 +3232,9 @@ ACTIONS['open-customer'] = (el) => {
 
     ${pays.length ? `<h4 class="sec-title">Payments received (${pays.length})</h4>
       <div class="list tight">${pays.slice(0, 10).map((p) => `<div class="row">
-        <div class="row-main"><b>${money(p.amount)}</b><small>${fmtDate(p.date)} · ${esc(p.mode || 'Cash')}${p.note ? ' · ' + esc(p.note) : ''}</small></div>
-        <button class="icon-btn danger" data-act="del-payment" data-id="${p.id}">${icon('trash')}</button>
+        <div class="row-main"><b>${money(p.amount)}</b><small>${fmtDate(p.date)} · ${esc(p.mode || 'Cash')}${p.note ? ' · ' + esc(p.note) : ''}${p.editedAt ? ' · edited' : ''}</small></div>
+        ${can('deletePayment') ? `<button class="icon-btn" data-act="edit-payment" data-id="${p.id}" title="Edit">${icon('edit')}</button>` : ''}
+        ${can('deletePayment') ? `<button class="icon-btn danger" data-act="del-payment" data-id="${p.id}" title="Delete">${icon('trash')}</button>` : ''}
       </div>`).join('')}</div>` : ''}
   `, { wide: true });
 };
@@ -3317,10 +3323,14 @@ function nextCustFrom() { return S.customers.slice().sort((a, b) => a.name.local
 function payModal(preset = {}) {
   const custId = preset.customerId || '';
   const c = custId ? findCustomer(custId) : null;
-  const alloc = c ? allocatePayments(S.invoices.filter((i) => i.customerId === c.id), S.payments) : null;
+  const editId = preset.editId || '';          // set when correcting an existing payment
+  // When editing, leave this payment out of the pending figures so the bill it is
+  // already covering still shows up in the "apply to bill" list.
+  const others = editId ? S.payments.filter((p) => p.id !== editId) : S.payments;
+  const alloc = c ? allocatePayments(S.invoices.filter((i) => i.customerId === c.id), others) : null;
   const openBills = c ? S.invoices.filter((i) => i.customerId === c.id && (alloc.byInvoice[i.id] || {}).due > 0.004).sort(sortByDate) : [];
-  const bal = c ? customerBalance(c, S.invoices, S.payments) : 0;
-  UI.openModal('Record payment' + (c ? ' — ' + c.name : ''), `
+  const bal = c ? customerBalance(c, S.invoices, others) : 0;
+  UI.openModal((editId ? 'Edit payment' : 'Record payment') + (c ? ' — ' + c.name : ''), `
     <div class="form-grid">
       <label class="fld wide"><span>Customer *</span>
         <select id="pm_cust">${customerOptions(custId)}</select></label>
@@ -3331,7 +3341,7 @@ function payModal(preset = {}) {
       </label>
       <label class="fld"><span>Date</span><input id="pm_date" type="date" value="${preset.date || todayISO()}"></label>
       <label class="fld"><span>Mode</span>
-        <select id="pm_mode">${(S.settings.paymentModes || ['Cash', 'UPI', 'Bank', 'Cheque']).map((m) => `<option ${m === 'Cash' ? 'selected' : ''}>${esc(m)}</option>`).join('')}</select></label>
+        <select id="pm_mode">${(S.settings.paymentModes || ['Cash', 'UPI', 'Bank', 'Cheque']).map((m) => `<option ${m === (preset.mode || 'Cash') ? 'selected' : ''}>${esc(m)}</option>`).join('')}</select></label>
       <label class="fld"><span>Apply to bill (optional)</span>
         <select id="pm_inv">
           <option value="">Auto — clear oldest bill first</option>
@@ -3345,9 +3355,11 @@ function payModal(preset = {}) {
       <button class="chip" data-act="pay-set-amt" data-v="1000">${money(1000)}</button>
       <button class="chip" data-act="pay-set-amt" data-v="2000">${money(2000)}</button></div>
     <div class="modal-actions">
-      <button class="btn primary" data-act="pay-save">${icon('check')} Save payment</button>
+      <button class="btn primary" data-act="pay-save" ${editId ? `data-edit="${editId}"` : ''}>${icon('check')} ${editId ? 'Save changes' : 'Save payment'}</button>
+      ${editId && can('deletePayment') ? `<button class="btn danger" data-act="del-payment" data-id="${editId}">${icon('trash')} Delete</button>` : ''}
       <button class="btn ghost" data-act="modal-close">Cancel</button>
-    </div>`);
+    </div>
+    ${editId ? '<p class="note-line">Editing an entry changes every balance it affects. Correct mistakes here rather than adding a second entry to cancel one out.</p>' : ''}`);
   const sel = document.getElementById('pm_cust');
   if (sel) sel.onchange = () => {
     const id = sel.value;
@@ -3370,8 +3382,10 @@ ACTIONS['pay-modal'] = (el) => payModal({
 });
 ACTIONS['pay-set-amt'] = (el) => { const i = document.getElementById('pm_amt'); if (i) i.value = el.dataset.v; };
 
-ACTIONS['pay-save'] = async () => {
+ACTIONS['pay-save'] = async (el) => {
   if (!requirePerm('payment', 'record payments')) return;
+  const editId = (el && el.dataset && el.dataset.edit) || '';
+  if (editId && !requirePerm('deletePayment', 'edit payments')) return;
   const custEl = document.getElementById('pm_cust');
   const amtEl = document.getElementById('pm_amt');
   if (!custEl || !amtEl) return;               // the form was closed before the tap landed
@@ -3381,26 +3395,48 @@ ACTIONS['pay-save'] = async () => {
   if (amount <= 0) return UI.toast('Enter the amount received', 'warn');
   const c = findCustomer(custId);
   const val = (id) => { const el = document.getElementById(id); return el ? el.value : ''; };
+  const existing = editId ? S.payments.find((p) => p.id === editId) : null;
   const pay = {
-    id: uid('pay'), customerId: custId, customerName: c ? c.name : '',
+    id: existing ? existing.id : uid('pay'), customerId: custId, customerName: c ? c.name : '',
     amount: round2(amount), date: val('pm_date') || todayISO(),
     mode: val('pm_mode') || 'Cash', invoiceId: val('pm_inv'),
-    note: val('pm_note').trim(), createdBy: (DB.user && DB.user.email) || 'local'
+    note: val('pm_note').trim(),
+    createdBy: existing ? (existing.createdBy || 'local') : ((DB.user && DB.user.email) || 'local'),
+    createdAt: existing ? existing.createdAt : undefined
   };
+  if (existing) {
+    pay.editedBy = (DB.user && DB.user.email) || 'local';
+    pay.editedAt = new Date().toISOString();
+  }
   await ACT.savePayment(pay, S);
   UI.closeModal();
   render();
-  const alloc = allocatePayments(S.invoices.filter((i) => i.customerId === custId), S.payments);
+  // Use the same figure the khata screen shows. allocatePayments().totalDue only
+  // covers bills, so it silently drops any opening balance carried from the old
+  // register and the panel would understate what the customer still owes.
+  const remaining = customerBalance(c, S.invoices, S.payments);
   UI.openModal('Payment saved ✓', `<div class="saved">
       <div class="saved-big">${money(pay.amount)}</div>
       <div class="muted">${esc(c.name)} · ${fmtDate(pay.date)} · ${esc(pay.mode)}</div>
-      <div class="pill ${alloc.totalDue > 0 ? 'warn' : 'ok'}" style="margin-top:8px">${alloc.totalDue > 0 ? 'Remaining khata: ' + money(alloc.totalDue) : 'Khata fully settled'}</div>
+      <div class="pill ${remaining > 0.004 ? 'warn' : 'ok'}" style="margin-top:8px">${remaining > 0.004 ? 'Remaining khata: ' + money(remaining) : (remaining < -0.004 ? 'Advance with you: ' + money(-remaining) : 'Khata fully settled')}</div>
       <div class="saved-actions">
         <button class="btn primary" data-act="print-receipt" data-id="${pay.id}">${icon('print')} Print receipt</button>
         <button class="btn ghost" data-act="wa-payment" data-id="${pay.id}">${icon('wa')} Send confirmation</button>
         <button class="btn ghost" data-act="modal-close">Done</button>
       </div></div>`);
   S.open.customerId = custId;
+};
+
+/** Correct a payment that was entered wrong (amount, date, mode, customer, note). */
+ACTIONS['edit-payment'] = (el) => {
+  if (!requirePerm('deletePayment', 'edit payments')) return;
+  const p = S.payments.find((x) => x.id === el.dataset.id);
+  if (!p) return;
+  UI.closeModal();
+  payModal({
+    editId: p.id, customerId: p.customerId, amount: num(p.amount), date: p.date,
+    mode: p.mode || 'Cash', invoiceId: p.invoiceId || '', note: p.note || ''
+  });
 };
 
 ACTIONS['del-payment'] = async (el) => {
@@ -3573,6 +3609,7 @@ VIEWS.payments = function () {
         <div class="row-actions">
           <button class="icon-btn" data-act="print-receipt" data-id="${p.id}" title="Receipt">${icon('print')}</button>
           <button class="icon-btn" data-act="wa-payment" data-id="${p.id}" title="Send payment confirmation on WhatsApp">${icon('wa')}</button>
+          ${can('deletePayment') ? `<button class="icon-btn" data-act="edit-payment" data-id="${p.id}" title="Edit / correct this payment">${icon('edit')}</button>` : ''}
           ${can('deletePayment') ? `<button class="icon-btn danger" data-act="del-payment" data-id="${p.id}" title="Delete">${icon('trash')}</button>` : ''}
         </div>
       </div>`).join('')}</div>`) : card('', emptyState('No payments in this period.', 'Record payment', 'pay-modal', 'cash'))}

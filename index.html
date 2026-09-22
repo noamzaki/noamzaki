@@ -669,32 +669,57 @@ function allocatePayments(invoices, payments) {
   const invs = (invoices || []).slice().sort(sortByDate);
   const due = new Map();
   invs.forEach((i) => due.set(i.id, round2(num(i.total) - num(i.paidAtSale))));
-  const queue = [];
+
+  // Money must never cross between customers. Callers pass a mix of "all
+  // invoices" and "one customer's invoices", but almost all of them pass ALL
+  // payments, so we bucket by customerId here and allocate each customer's
+  // payments only against that same customer's bills.
+  const invsByCust = new Map();
+  invs.forEach((i) => {
+    const k = String(i.customerId || '');
+    if (!invsByCust.has(k)) invsByCust.set(k, []);
+    invsByCust.get(k).push(i);
+  });
+
+  const queueByCust = new Map();
   (payments || []).slice().sort(sortByDate).forEach((p) => {
+    const k = String(p.customerId || '');
+    if (!invsByCust.has(k)) return;            // payment for a customer not in this set
     let amt = round2(num(p.amount));
     if (amt <= 0) return;
+    // a payment tied to a specific bill clears that bill first (same customer only)
     if (p.invoiceId && due.has(p.invoiceId)) {
-      const d = due.get(p.invoiceId);
-      const use = Math.min(d, amt);
-      due.set(p.invoiceId, round2(d - use));
-      amt = round2(amt - use);
-      if (amt <= 0) return;
+      const target = invs.find((i) => i.id === p.invoiceId);
+      if (target && String(target.customerId || '') === k) {
+        const d = due.get(p.invoiceId);
+        const use = Math.min(d, amt);
+        due.set(p.invoiceId, round2(d - use));
+        amt = round2(amt - use);
+        if (amt <= 0) return;
+      }
     }
-    queue.push({ id: p.id, amount: amt });
+    if (!queueByCust.has(k)) queueByCust.set(k, []);
+    queueByCust.get(k).push({ id: p.id, amount: amt });
   });
-  let qi = 0;
-  invs.forEach((inv) => {
-    let d = due.get(inv.id);
-    while (d > 0.004 && qi < queue.length) {
-      const q = queue[qi];
-      const use = Math.min(d, q.amount);
-      d = round2(d - use);
-      q.amount = round2(q.amount - use);
-      due.set(inv.id, d);
-      if (q.amount <= 0.004) qi++;
-    }
+
+  let advance = 0;
+  invsByCust.forEach((custInvs, k) => {
+    const queue = queueByCust.get(k) || [];
+    let qi = 0;
+    custInvs.forEach((inv) => {
+      let d = due.get(inv.id);
+      while (d > 0.004 && qi < queue.length) {
+        const q = queue[qi];
+        const use = Math.min(d, q.amount);
+        d = round2(d - use);
+        q.amount = round2(q.amount - use);
+        due.set(inv.id, d);
+        if (q.amount <= 0.004) qi++;
+      }
+    });
+    advance = round2(advance + queue.slice(qi).reduce((s, q) => s + num(q.amount), 0));
   });
-  const advance = round2(queue.slice(qi).reduce((s, q) => s + num(q.amount), 0));
+
   const byInvoice = {};
   let totalDue = 0;
   invs.forEach((inv) => {

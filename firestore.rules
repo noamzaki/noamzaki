@@ -58,7 +58,6 @@ service cloud.firestore {
 
     // ── 1. shop data, permission by permission ──────────────────────────────
     match /settings/{doc} {
-      // the very first signed-in account claims ownership
       // The app claims ownership with setDoc(..., {merge:true}), which Firestore
       // treats as an UPDATE when the doc already exists (e.g. it was created by
       // an earlier settings save). Allow both paths for the unclaimed case.
@@ -78,14 +77,19 @@ service cloud.firestore {
     }
     match /moves/{doc} {
       allow read: if can('stock') || can('reports');
-      // billing writes sale movements, stock work writes the rest
-      allow create: if can('bill') || can('stock');
+      // billing writes sale movements, stock work writes the rest.
+      // Editing or deleting a bill reverses its stock, which writes 'reverse'
+      // movements, so bill-deleters need create rights here too.
+      allow create: if can('bill') || can('stock') || can('deleteBill');
       allow update, delete: if can('stock');
     }
     match /customers/{doc} {
       allow read: if isShopUser();               // billing needs names/balances
-      allow write: if can('khata') || can('bill');
-      allow delete: if isOwner();
+      // 'portal' covers creating/removing a customer's app login, which writes
+      // authUid + portal{} onto the customer document.
+      allow write: if can('khata') || can('bill') || can('portal');
+      // the app gates customer deletion on 'khata', not on ownership
+      allow delete: if can('khata');
     }
     match /invoices/{doc} {
       allow read: if isShopUser();
@@ -98,8 +102,11 @@ service cloud.firestore {
     match /payments/{doc} {
       allow read: if isShopUser();
       allow create: if can('payment') || can('bill');   // "received now" while billing
+      // Correcting a payment (wrong amount/date/mode) is gated on deletePayment
+      // in the app — the same privilege as removing it — so mirror that here.
+      // Without this, editing a payment fails with permission-denied.
+      allow update: if can('deletePayment');
       allow delete: if can('deletePayment');
-      allow update: if false;
     }
 
     // ── 2. customer portal: read-only, own records only ─────────────────────
